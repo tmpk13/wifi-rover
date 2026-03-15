@@ -53,10 +53,10 @@ const HTML_SITE: &str = r#"
     </style>
 </head>
 <body>
-    <h1>🤖 Wifi Rover</h1>
+    <h1>Wifi Rover</h1>
     <button onclick="fetch('/open')">Open</button>
     <button onclick="fetch('/close')">Close</button>
-    <button class="cycle" onclick="fetch('/cycle')">🌊 Wave / Cycle</button>
+    <button class="cycle" onclick="fetch('/cycle')">Cycle</button>
     <p id="status">Ready</p>
     <script>
         // Simple feedback
@@ -127,7 +127,7 @@ fn main() -> Result<()> {
     // API: Open
     let s_clone = servo.clone();
     server.fn_handler("/open", Method::Get, move |request| -> Result<()> {
-        log::info!("Open");
+        log::info!("<-- Open");
 
         let mut s = s_clone.lock().unwrap();
         set_angle(&mut s, SERVO_OPEN);
