@@ -4,11 +4,11 @@ use embedded_svc::{
     io::Write,
     ws::{FrameType, Receiver},
 };
-use esp_idf_hal::{delay::FreeRtos, ledc::LedcDriver};
+use esp_idf_hal::ledc::LedcDriver;
 use esp_idf_svc::http::server::{ws::EspHttpWsConnection, EspHttpServer};
 use std::sync::{Arc, Mutex};
 
-use crate::config::{SERVO_CLOSE, SERVO_OPEN, SERVO_CENTER, SERVO_LEFT, SERVO_RIGHT};
+use crate::config::{SERVO_CENTER, SERVO_LEFT, SERVO_RIGHT};
 use crate::motor::Motors;
 use crate::servo::set_angle;
 
@@ -17,54 +17,171 @@ const HTML_SITE: &str = r#"
 <html>
 <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
     <title>Wifi Rover</title>
     <style>
-        body { font-family: sans-serif; text-align: center; margin-top: 30px; background: #222; color: #fff; }
-        h2 { color: #aaa; font-size: 1rem; text-transform: uppercase; letter-spacing: 2px; margin: 24px 0 8px; }
-        button {
-            display: inline-block; width: 80px; height: 80px; margin: 6px;
-            font-size: 1.4rem; border: none; border-radius: 12px; cursor: pointer;
-            background: #007BFF; color: white; transition: 0.15s;
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: sans-serif; text-align: center;
+            background: #1a1a1a; color: #fff;
+            height: 100dvh;
+            display: flex; flex-direction: column;
+            align-items: center; justify-content: center;
+            touch-action: none; user-select: none; -webkit-user-select: none;
         }
-        button:active { background: #0056b3; transform: scale(0.95); }
-        .wide { width: 174px; }
-        .stop { background: #dc3545; }
-        .stop:active { background: #a71d2a; }
-        .servo { background: #28a745; }
-        .servo:active { background: #1a6e30; }
-        #status { color: #888; margin-top: 16px; }
+        h1 { font-size: 1rem; color: #555; letter-spacing: 4px; text-transform: uppercase; margin-bottom: 32px; }
+        #base {
+            position: relative;
+            width: 260px; height: 260px;
+            border-radius: 50%;
+            background: #242424;
+            border: 2px solid #383838;
+            cursor: crosshair;
+            overflow: hidden;
+            touch-action: none;
+        }
+        /* Crosshair lines via pseudo-elements (clipped to circle by overflow:hidden) */
+        #base::before, #base::after {
+            content: '';
+            position: absolute;
+            background: rgba(255,255,255,0.07);
+            pointer-events: none;
+        }
+        #base::before { width: 1px; height: 100%; left: 50%; transform: translateX(-50%); }
+        #base::after  { height: 1px; width: 100%; top: 50%;  transform: translateY(-50%); }
+        /* Dead-zone bands – sized by JS */
+        #dz-x, #dz-y {
+            position: absolute;
+            background: rgba(255,255,255,0.045);
+            border: 1px solid rgba(255,255,255,0.07);
+            pointer-events: none;
+        }
+        #thumb {
+            position: absolute;
+            width: 72px; height: 72px;
+            border-radius: 50%;
+            background: #1a6bcc;
+            border: 2px solid rgba(255,255,255,0.18);
+            transform: translate(-50%, -50%);
+            left: 50%; top: 50%;
+            pointer-events: none;
+            box-shadow: 0 2px 14px rgba(0,0,0,0.6), 0 0 22px rgba(26,107,204,0.28);
+            transition: background 0.08s;
+        }
+        #status {
+            margin-top: 24px; color: #484848;
+            font-size: 0.78rem; font-family: monospace;
+            min-height: 1.2em; letter-spacing: 1px;
+        }
     </style>
 </head>
 <body>
     <h1>Wifi Rover</h1>
-
-    <h2>Drive</h2>
-    <div>
-        <button onpointerdown="send('forward')" onpointerup="send('stop')" onpointerleave="send('stop')" onpointercancel="send('stop')">&#x25B2;</button>
+    <div id="base">
+        <div id="dz-x"></div>
+        <div id="dz-y"></div>
+        <div id="thumb"></div>
     </div>
-    <div>
-        <button onpointerdown="send('left')" onpointerup="send('center')" onpointerleave="send('center')" onpointercancel="send('center')">&#x25C4;</button>
-        <button class="stop" onpointerdown="send('stop');send('center')">&#x25A0;</button>
-        <button onpointerdown="send('right')" onpointerup="send('center')" onpointerleave="send('center')" onpointercancel="send('center')">&#x25BA;</button>
-    </div>
-    <div>
-        <button onpointerdown="send('backward')" onpointerup="send('stop')" onpointerleave="send('stop')" onpointercancel="send('stop')">&#x25BC;</button>
-    </div>
-
     <p id="status">Connecting...</p>
     <script>
+        // Layout constants (must match CSS)
+        const BASE_D  = 260;
+        const THUMB_R = 36;                          // half of thumb width
+        const MAX_R   = BASE_D / 2 - THUMB_R;        // 94 px max travel from centre
+        const DZ      = 0.18;                         // 18 % dead-zone per axis
+        const DZ_PX   = Math.round(MAX_R * DZ);       // ~17 px
+        const PCT     = 50 * MAX_R / (BASE_D / 2);   // max thumb % offset (~36.2 %)
+
+        // Size the dead-zone bands
+        // dz-x: vertical band  → X-axis dead-zone (no steering)
+        // dz-y: horizontal band → Y-axis dead-zone (no throttle)
+        document.getElementById('dz-x').style.cssText =
+            `top:0;bottom:0;left:${BASE_D/2 - DZ_PX}px;width:${DZ_PX*2}px;`;
+        document.getElementById('dz-y').style.cssText =
+            `left:0;right:0;top:${BASE_D/2 - DZ_PX}px;height:${DZ_PX*2}px;`;
+
+        const base   = document.getElementById('base');
+        const thumb  = document.getElementById('thumb');
+        const status = document.getElementById('status');
+
+        // WebSocket
         let ws;
         function connect() {
             ws = new WebSocket('ws://' + location.host + '/ws');
-            ws.onopen  = () => { document.getElementById('status').innerText = 'Ready'; };
+            ws.onopen  = () => { status.innerText = 'Ready'; };
             ws.onclose = () => {
-                document.getElementById('status').innerText = 'Disconnected – reconnecting…';
+                status.innerText = 'Disconnected – reconnecting…';
                 setTimeout(connect, 1500);
             };
         }
         connect();
-        function send(c) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(c); }
+        function wsSend(c) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(c); }
+
+        // Joystick state
+        let rawX = 0, rawY = 0, active = false;
+        let lastMotor = null, lastSteer = null;
+
+        function applyDz(v) {
+            if (Math.abs(v) < DZ) return 0;
+            return (v - Math.sign(v) * DZ) / (1 - DZ);
+        }
+
+        function updateUI() {
+            thumb.style.left = (50 + rawX * PCT) + '%';
+            thumb.style.top  = (50 - rawY * PCT) + '%';
+            const my = applyDz(rawY);
+            thumb.style.background =
+                my >  0.05 ? '#22863a' :   // forward  → green
+                my < -0.05 ? '#b94e00' :   // reverse  → amber
+                             '#1a6bcc';    // neutral  → blue
+        }
+
+        function transmit() {
+            const motor = Math.round(applyDz(rawY) * 100);
+            const steer = Math.round(applyDz(rawX) * 100);
+            if (motor === lastMotor && steer === lastSteer) return;
+            lastMotor = motor; lastSteer = steer;
+            wsSend('js:' + motor + ',' + steer);
+            const ms = (motor >= 0 ? '+' : '') + motor;
+            const ss = (steer >= 0 ? '+' : '') + steer;
+            status.innerText = 'M ' + ms + '  S ' + ss;
+        }
+
+        function onMove(e) {
+            if (!active) return;
+            const r  = base.getBoundingClientRect();
+            const cx = r.left + r.width  / 2;
+            const cy = r.top  + r.height / 2;
+            let dx = e.clientX - cx;
+            let dy = e.clientY - cy;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist > MAX_R) { dx *= MAX_R / dist; dy *= MAX_R / dist; }
+            rawX =  dx / MAX_R;
+            rawY = -dy / MAX_R;   // up = positive
+            updateUI();
+            transmit();
+        }
+
+        function onStart(e) {
+            e.preventDefault();
+            active = true;
+            base.setPointerCapture(e.pointerId);
+            onMove(e);
+        }
+
+        function onEnd() {
+            active = false;
+            rawX = 0; rawY = 0;
+            lastMotor = null; lastSteer = null;
+            updateUI();
+            wsSend('js:0,0');
+            status.innerText = 'Ready';
+        }
+
+        base.addEventListener('pointerdown',   onStart);
+        base.addEventListener('pointermove',   onMove);
+        base.addEventListener('pointerup',     onEnd);
+        base.addEventListener('pointercancel', onEnd);
     </script>
 </body>
 </html>
@@ -96,25 +213,17 @@ pub fn register_handlers(
                 let cmd = core::str::from_utf8(&buf[..len]).unwrap_or("?").trim_end_matches('\0');
                 log::info!("WS cmd: {}", cmd);
                 match cmd {
-                    "forward"  => { motors.lock().unwrap().drive(100, 0)?; }
-                    "backward" => { motors.lock().unwrap().drive(0, 100)?; }
-                    "stop"     => { motors.lock().unwrap().stop()?; }
-                    "left"     => { set_angle(&mut servo.lock().unwrap(), SERVO_LEFT); }
-                    "right"    => { set_angle(&mut servo.lock().unwrap(), SERVO_RIGHT); }
-                    "center"   => { set_angle(&mut servo.lock().unwrap(), SERVO_CENTER); }
-                    "open"  => { set_angle(&mut servo.lock().unwrap(), SERVO_OPEN); }
-                    "close" => { set_angle(&mut servo.lock().unwrap(), SERVO_CLOSE); }
-                    "cycle" => {
-                        let mut s = servo.lock().unwrap();
-                        set_angle(&mut s, SERVO_OPEN);
-                        drop(s);
-                        FreeRtos::delay_ms(500);
-                        let mut s = servo.lock().unwrap();
-                        set_angle(&mut s, SERVO_CLOSE);
-                        drop(s);
-                        FreeRtos::delay_ms(500);
-                        let mut s = servo.lock().unwrap();
-                        set_angle(&mut s, SERVO_OPEN);
+                    other if other.starts_with("js:") => {
+                        if let Some((m_str, s_str)) = other[3..].split_once(',') {
+                            let motor = m_str.parse::<i32>().unwrap_or(0).clamp(-100, 100);
+                            let steer = s_str.parse::<i32>().unwrap_or(0).clamp(-100, 100);
+                            let (l, r) = if motor >= 0 { (motor as u8, 0u8) } else { (0u8, (-motor) as u8) };
+                            motors.lock().unwrap().drive(l, r)?;
+                            let angle = (SERVO_CENTER as i32
+                                + steer * (SERVO_RIGHT as i32 - SERVO_LEFT as i32) / 200)
+                                .clamp(SERVO_LEFT as i32, SERVO_RIGHT as i32) as u32;
+                            set_angle(&mut servo.lock().unwrap(), angle);
+                        }
                     }
                     other => { log::warn!("WS: unknown cmd '{}'", other); }
                 }
