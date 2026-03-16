@@ -8,7 +8,7 @@ use esp_idf_hal::{delay::FreeRtos, ledc::LedcDriver};
 use esp_idf_svc::http::server::{ws::EspHttpWsConnection, EspHttpServer};
 use std::sync::{Arc, Mutex};
 
-use crate::config::{SERVO_CLOSE, SERVO_OPEN};
+use crate::config::{SERVO_CLOSE, SERVO_OPEN, SERVO_CENTER, SERVO_LEFT, SERVO_RIGHT};
 use crate::motor::Motors;
 use crate::servo::set_angle;
 
@@ -41,21 +41,16 @@ const HTML_SITE: &str = r#"
 
     <h2>Drive</h2>
     <div>
-        <button onclick="cmd('forward')">&#x25B2;</button>
+        <button onpointerdown="send('forward')" onpointerup="send('stop')" onpointerleave="send('stop')" onpointercancel="send('stop')">&#x25B2;</button>
     </div>
     <div>
-        <button onclick="cmd('left')">&#x25C4;</button>
-        <button class="stop" onclick="cmd('stop')">&#x25A0;</button>
-        <button onclick="cmd('right')">&#x25BA;</button>
+        <button onpointerdown="send('left')" onpointerup="send('center')" onpointerleave="send('center')" onpointercancel="send('center')">&#x25C4;</button>
+        <button class="stop" onpointerdown="send('stop');send('center')">&#x25A0;</button>
+        <button onpointerdown="send('right')" onpointerup="send('center')" onpointerleave="send('center')" onpointercancel="send('center')">&#x25BA;</button>
     </div>
     <div>
-        <button onclick="cmd('backward')">&#x25BC;</button>
+        <button onpointerdown="send('backward')" onpointerup="send('stop')" onpointerleave="send('stop')" onpointercancel="send('stop')">&#x25BC;</button>
     </div>
-
-    <h2>Servo</h2>
-    <button class="servo wide" onclick="cmd('open')">Open</button>
-    <button class="servo wide" onclick="cmd('close')">Close</button>
-    <button class="servo wide" onclick="cmd('cycle')">Cycle</button>
 
     <p id="status">Connecting...</p>
     <script>
@@ -69,11 +64,7 @@ const HTML_SITE: &str = r#"
             };
         }
         connect();
-        function cmd(c) {
-            if (ws && ws.readyState === WebSocket.OPEN) ws.send(c);
-            document.getElementById('status').innerText = c;
-            setTimeout(() => document.getElementById('status').innerText = 'Ready', 800);
-        }
+        function send(c) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(c); }
     </script>
 </body>
 </html>
@@ -91,36 +82,45 @@ pub fn register_handlers(
     })?;
 
     server.ws_handler("/ws", None, move |ws: &mut EspHttpWsConnection| -> Result<()> {
+        if matches!(ws, EspHttpWsConnection::New(..)) {
+            log::info!("WS: client connected");
+            return Ok(());
+        }
+        if matches!(ws, EspHttpWsConnection::Closed(..)) {
+            log::info!("WS: client disconnected");
+            return Ok(());
+        }
         let mut buf = [0u8; 64];
-        loop {
-            match ws.recv(&mut buf) {
-                Ok((FrameType::Text(_), len)) => {
-                    match core::str::from_utf8(&buf[..len]).unwrap_or("") {
-                        "forward"  => { motors.lock().unwrap().drive(100, 100)?; }
-                        "backward" => { motors.lock().unwrap().stop()?; }
-                        "left"     => { motors.lock().unwrap().drive(0, 100)?; }
-                        "right"    => { motors.lock().unwrap().drive(100, 0)?; }
-                        "stop"     => { motors.lock().unwrap().stop()?; }
-                        "open"  => { set_angle(&mut servo.lock().unwrap(), SERVO_OPEN); }
-                        "close" => { set_angle(&mut servo.lock().unwrap(), SERVO_CLOSE); }
-                        "cycle" => {
-                            let mut s = servo.lock().unwrap();
-                            set_angle(&mut s, SERVO_OPEN);
-                            drop(s);
-                            FreeRtos::delay_ms(500);
-                            let mut s = servo.lock().unwrap();
-                            set_angle(&mut s, SERVO_CLOSE);
-                            drop(s);
-                            FreeRtos::delay_ms(500);
-                            let mut s = servo.lock().unwrap();
-                            set_angle(&mut s, SERVO_OPEN);
-                        }
-                        _ => {}
+        match ws.recv(&mut buf) {
+            Ok((FrameType::Text(_), len)) => {
+                let cmd = core::str::from_utf8(&buf[..len]).unwrap_or("?").trim_end_matches('\0');
+                log::info!("WS cmd: {}", cmd);
+                match cmd {
+                    "forward"  => { motors.lock().unwrap().drive(100, 0)?; }
+                    "backward" => { motors.lock().unwrap().drive(0, 100)?; }
+                    "stop"     => { motors.lock().unwrap().stop()?; }
+                    "left"     => { set_angle(&mut servo.lock().unwrap(), SERVO_LEFT); }
+                    "right"    => { set_angle(&mut servo.lock().unwrap(), SERVO_RIGHT); }
+                    "center"   => { set_angle(&mut servo.lock().unwrap(), SERVO_CENTER); }
+                    "open"  => { set_angle(&mut servo.lock().unwrap(), SERVO_OPEN); }
+                    "close" => { set_angle(&mut servo.lock().unwrap(), SERVO_CLOSE); }
+                    "cycle" => {
+                        let mut s = servo.lock().unwrap();
+                        set_angle(&mut s, SERVO_OPEN);
+                        drop(s);
+                        FreeRtos::delay_ms(500);
+                        let mut s = servo.lock().unwrap();
+                        set_angle(&mut s, SERVO_CLOSE);
+                        drop(s);
+                        FreeRtos::delay_ms(500);
+                        let mut s = servo.lock().unwrap();
+                        set_angle(&mut s, SERVO_OPEN);
                     }
+                    other => { log::warn!("WS: unknown cmd '{}'", other); }
                 }
-                Ok((FrameType::Close, _)) | Err(_) => break,
-                _ => {}
             }
+            Ok((frame_type, _)) => { log::debug!("WS: unhandled frame {:?}", frame_type); }
+            Err(e) => { log::warn!("WS recv error: {:?}", e); }
         }
         Ok(())
     })?;
