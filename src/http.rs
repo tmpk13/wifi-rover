@@ -69,9 +69,25 @@ const HTML_SITE: &str = r#"
             transition: background 0.08s;
         }
         #status {
-            margin-top: 24px; color: #484848;
+            margin-top: 20px; color: #484848;
             font-size: 0.78rem; font-family: monospace;
             min-height: 1.2em; letter-spacing: 1px;
+        }
+        .scale-row {
+            display: flex; align-items: center; gap: 10px;
+            width: 260px; margin-top: 14px;
+        }
+        .scale-row label {
+            font-size: 0.72rem; color: #555; letter-spacing: 1px;
+            text-transform: uppercase; width: 42px; text-align: right;
+            flex-shrink: 0;
+        }
+        .scale-row input[type=range] {
+            flex: 1; accent-color: #1a6bcc; cursor: pointer;
+        }
+        .scale-row span {
+            font-size: 0.72rem; font-family: monospace; color: #555;
+            width: 34px; text-align: left; flex-shrink: 0;
         }
     </style>
 </head>
@@ -81,6 +97,16 @@ const HTML_SITE: &str = r#"
         <div id="dz-x"></div>
         <div id="dz-y"></div>
         <div id="thumb"></div>
+    </div>
+    <div class="scale-row">
+        <label>Speed</label>
+        <input id="spd" type="range" min="0" max="100" value="100">
+        <span id="spd-val">100%</span>
+    </div>
+    <div class="scale-row">
+        <label>Steer</label>
+        <input id="str" type="range" min="0" max="100" value="100">
+        <span id="str-val">100%</span>
     </div>
     <p id="status">Connecting...</p>
     <script>
@@ -103,6 +129,12 @@ const HTML_SITE: &str = r#"
         const base   = document.getElementById('base');
         const thumb  = document.getElementById('thumb');
         const status = document.getElementById('status');
+        const spdSlider = document.getElementById('spd');
+        const strSlider = document.getElementById('str');
+        const spdVal    = document.getElementById('spd-val');
+        const strVal    = document.getElementById('str-val');
+        spdSlider.addEventListener('input', () => { spdVal.innerText = spdSlider.value + '%'; transmit(true); });
+        strSlider.addEventListener('input', () => { strVal.innerText = strSlider.value + '%'; transmit(true); });
 
         // WebSocket
         let ws;
@@ -136,10 +168,12 @@ const HTML_SITE: &str = r#"
                              '#1a6bcc';    // neutral  → blue
         }
 
-        function transmit() {
-            const motor = Math.round(applyDz(rawY) * 100);
-            const steer = Math.round(applyDz(rawX) * 100);
-            if (motor === lastMotor && steer === lastSteer) return;
+        function transmit(force) {
+            const spdScale = spdSlider.value / 100;
+            const strScale = strSlider.value / 100;
+            const motor = Math.round(applyDz(rawY) * 100 * spdScale);
+            const steer = Math.round(applyDz(rawX) * 100 * strScale);
+            if (!force && motor === lastMotor && steer === lastSteer) return;
             lastMotor = motor; lastSteer = steer;
             wsSend('js:' + motor + ',' + steer);
             const ms = (motor >= 0 ? '+' : '') + motor;
