@@ -73,6 +73,16 @@ const HTML_SITE: &str = r#"
             font-size: 0.78rem; font-family: monospace;
             min-height: 1.2em; letter-spacing: 1px;
         }
+        #settings {
+            width: 260px; margin-top: 16px;
+        }
+        #settings summary {
+            font-size: 0.72rem; color: #484848; letter-spacing: 2px;
+            text-transform: uppercase; cursor: pointer; user-select: none;
+            list-style: none; text-align: center;
+        }
+        #settings summary::after { content: ' ▾'; }
+        #settings[open] summary::after { content: ' ▴'; }
         .scale-row {
             display: flex; align-items: center; gap: 10px;
             width: 260px; margin-top: 14px;
@@ -98,16 +108,19 @@ const HTML_SITE: &str = r#"
         <div id="dz-y"></div>
         <div id="thumb"></div>
     </div>
-    <div class="scale-row">
-        <label>Speed</label>
-        <input id="spd" type="range" min="0" max="100" value="100">
-        <span id="spd-val">100%</span>
-    </div>
-    <div class="scale-row">
-        <label>Steer</label>
-        <input id="str" type="range" min="0" max="100" value="100">
-        <span id="str-val">100%</span>
-    </div>
+    <details id="settings">
+        <summary>Settings</summary>
+        <div class="scale-row">
+            <label>Speed</label>
+            <input id="spd" type="range" min="0" max="100" value="100">
+            <span id="spd-val">100%</span>
+        </div>
+        <div class="scale-row">
+            <label>Steer</label>
+            <input id="str" type="range" min="0" max="100" value="100">
+            <span id="str-val">100%</span>
+        </div>
+    </details>
     <p id="status">Connecting...</p>
     <script>
         // Layout constants (must match CSS)
