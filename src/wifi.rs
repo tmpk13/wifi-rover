@@ -28,8 +28,17 @@ pub fn connect(
 
     log::info!("Connecting to Wi-Fi...");
     wifi.start()?;
-    wifi.connect()?;
-    wifi.wait_netif_up()?;
+
+    loop {
+        match wifi.connect() {
+            Ok(_) => match wifi.wait_netif_up() {
+                Ok(_) => break,
+                Err(e) => log::warn!("Waiting for netif failed: {e}, retrying..."),
+            },
+            Err(e) => log::warn!("Wi-Fi connect failed: {e}, retrying..."),
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
 
     let ip_info = wifi.wifi().sta_netif().get_ip_info()?;
     log::info!("-------------------------------------------------");
