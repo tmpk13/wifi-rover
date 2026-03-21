@@ -8,7 +8,6 @@ use esp_idf_hal::ledc::LedcDriver;
 use esp_idf_svc::http::server::{ws::EspHttpWsConnection, EspHttpServer};
 use std::sync::{Arc, Mutex};
 
-use crate::config::{SERVO_CENTER, SERVO_LEFT, SERVO_RIGHT};
 use crate::motor::Motors;
 use crate::servo::set_angle;
 
@@ -40,7 +39,6 @@ const HTML_SITE: &str = r#"
             overflow: hidden;
             touch-action: none;
         }
-        /* Crosshair lines via pseudo-elements (clipped to circle by overflow:hidden) */
         #base::before, #base::after {
             content: '';
             position: absolute;
@@ -49,7 +47,6 @@ const HTML_SITE: &str = r#"
         }
         #base::before { width: 1px; height: 100%; left: 50%; transform: translateX(-50%); }
         #base::after  { height: 1px; width: 100%; top: 50%;  transform: translateY(-50%); }
-        /* Dead-zone bands – sized by JS */
         #dz-x, #dz-y {
             position: absolute;
             background: rgba(255,255,255,0.045);
@@ -123,17 +120,19 @@ const HTML_SITE: &str = r#"
     </details>
     <p id="status">Connecting...</p>
     <script>
+        // Steering servo geometry (must match hardware config)
+        const SERVO_LEFT   = 45;
+        const SERVO_CENTER = 90;
+        const SERVO_RIGHT  = 135;
+
         // Layout constants (must match CSS)
         const BASE_D  = 260;
-        const THUMB_R = 36;                          // half of thumb width
-        const MAX_R   = BASE_D / 2 - THUMB_R;        // 94 px max travel from centre
-        const DZ      = 0.18;                         // 18 % dead-zone per axis
-        const DZ_PX   = Math.round(MAX_R * DZ);       // ~17 px
-        const PCT     = 50 * MAX_R / (BASE_D / 2);   // max thumb % offset (~36.2 %)
+        const THUMB_R = 36;
+        const MAX_R   = BASE_D / 2 - THUMB_R;
+        const DZ      = 0.18;
+        const DZ_PX   = Math.round(MAX_R * DZ);
+        const PCT     = 50 * MAX_R / (BASE_D / 2);
 
-        // Size the dead-zone bands
-        // dz-x: vertical band  → X-axis dead-zone (no steering)
-        // dz-y: horizontal band → Y-axis dead-zone (no throttle)
         document.getElementById('dz-x').style.cssText =
             `top:0;bottom:0;left:${BASE_D/2 - DZ_PX}px;width:${DZ_PX*2}px;`;
         document.getElementById('dz-y').style.cssText =
@@ -164,11 +163,32 @@ const HTML_SITE: &str = r#"
 
         // Joystick state
         let rawX = 0, rawY = 0, active = false;
-        let lastMotor = null, lastSteer = null;
+        let lastCmd = null;
 
         function applyDz(v) {
             if (Math.abs(v) < DZ) return 0;
             return (v - Math.sign(v) * DZ) / (1 - DZ);
+        }
+
+        // Compute hardware values from joystick position
+        function compute() {
+            const spdScale = spdSlider.value / 100;
+            const strScale = strSlider.value / 100;
+            const motor = applyDz(rawY) * 100 * spdScale;
+            const steer = applyDz(rawX) * strScale;
+
+            // Motor: forward channel / reverse channel
+            const fwd = Math.round(Math.max(0, motor));
+            const rev = Math.round(Math.max(0, -motor));
+
+            // Servo angle from steer (-1..1) mapped to servo range
+            const angle = Math.round(
+                Math.max(SERVO_LEFT, Math.min(SERVO_RIGHT,
+                    SERVO_CENTER + steer * (SERVO_RIGHT - SERVO_LEFT) / 2
+                ))
+            );
+
+            return { fwd, rev, angle };
         }
 
         function updateUI() {
@@ -176,22 +196,18 @@ const HTML_SITE: &str = r#"
             thumb.style.top  = (50 - rawY * PCT) + '%';
             const my = applyDz(rawY);
             thumb.style.background =
-                my >  0.05 ? '#22863a' :   // forward  → green
-                my < -0.05 ? '#b94e00' :   // reverse  → amber
-                             '#1a6bcc';    // neutral  → blue
+                my >  0.05 ? '#22863a' :
+                my < -0.05 ? '#b94e00' :
+                             '#1a6bcc';
         }
 
         function transmit(force) {
-            const spdScale = spdSlider.value / 100;
-            const strScale = strSlider.value / 100;
-            const motor = Math.round(applyDz(rawY) * 100 * spdScale);
-            const steer = Math.round(applyDz(rawX) * 100 * strScale);
-            if (!force && motor === lastMotor && steer === lastSteer) return;
-            lastMotor = motor; lastSteer = steer;
-            wsSend('js:' + motor + ',' + steer);
-            const ms = (motor >= 0 ? '+' : '') + motor;
-            const ss = (steer >= 0 ? '+' : '') + steer;
-            status.innerText = 'M ' + ms + '  S ' + ss;
+            const { fwd, rev, angle } = compute();
+            const cmd = fwd + ',' + rev + ',' + angle;
+            if (!force && cmd === lastCmd) return;
+            lastCmd = cmd;
+            wsSend('c:' + cmd);
+            status.innerText = 'F ' + fwd + '  R ' + rev + '  A ' + angle;
         }
 
         function onMove(e) {
@@ -202,7 +218,7 @@ const HTML_SITE: &str = r#"
             let dx = Math.max(-MAX_R, Math.min(MAX_R, e.clientX - cx));
             let dy = Math.max(-MAX_R, Math.min(MAX_R, e.clientY - cy));
             rawX =  dx / MAX_R;
-            rawY = -dy / MAX_R;   // up = positive
+            rawY = -dy / MAX_R;
             updateUI();
             transmit();
         }
@@ -217,9 +233,9 @@ const HTML_SITE: &str = r#"
         function onEnd() {
             active = false;
             rawX = 0; rawY = 0;
-            lastMotor = null; lastSteer = null;
+            lastCmd = null;
             updateUI();
-            wsSend('js:0,0');
+            wsSend('c:0,0,90');
             status.innerText = 'Ready';
         }
 
@@ -238,12 +254,14 @@ pub fn register_handlers(
     servo2: Arc<Mutex<LedcDriver<'static>>>,
     motors: Arc<Mutex<Motors<'static>>>,
 ) -> Result<()> {
+    // Serve the control page
     server.fn_handler("/", Method::Get, |request| -> Result<()> {
         let mut response = request.into_ok_response()?;
         response.write_all(HTML_SITE.as_bytes())?;
         Ok(())
     })?;
 
+    // WebSocket: receive pre-computed values and apply directly
     server.ws_handler("/ws", None, move |ws: &mut EspHttpWsConnection| -> Result<()> {
         if matches!(ws, EspHttpWsConnection::New(..)) {
             log::info!("WS: client connected");
@@ -257,23 +275,19 @@ pub fn register_handlers(
         match ws.recv(&mut buf) {
             Ok((FrameType::Text(_), len)) => {
                 let cmd = core::str::from_utf8(&buf[..len]).unwrap_or("?").trim_end_matches('\0');
-                log::info!("WS cmd: {}", cmd);
-                match cmd {
-                    other if other.starts_with("js:") => {
-                        if let Some((m_str, s_str)) = other[3..].split_once(',') {
-                            let motor = m_str.parse::<i32>().unwrap_or(0).clamp(-100, 100);
-                            let steer = s_str.parse::<i32>().unwrap_or(0).clamp(-100, 100);
-                            let (l, r) = if motor >= 0 { (motor as u8, 0u8) } else { (0u8, (-motor) as u8) };
-                            motors.lock().unwrap().drive(l, r)?;
-                            let angle = (SERVO_CENTER as i32
-                                + steer * (SERVO_RIGHT as i32 - SERVO_LEFT as i32) / 200)
-                                .clamp(SERVO_LEFT as i32, SERVO_RIGHT as i32) as u32;
-                            set_angle(&mut servo.lock().unwrap(), angle);
-                            let mirrored = (SERVO_LEFT + SERVO_RIGHT) as u32 - angle;
-                            set_angle(&mut servo2.lock().unwrap(), mirrored);
-                        }
+                if let Some(vals) = cmd.strip_prefix("c:") {
+                    let parts: Vec<&str> = vals.splitn(3, ',').collect();
+                    if parts.len() == 3 {
+                        let fwd = parts[0].parse::<u8>().unwrap_or(0).min(100);
+                        let rev = parts[1].parse::<u8>().unwrap_or(0).min(100);
+                        let angle = parts[2].parse::<u32>().unwrap_or(90).clamp(0, 180);
+                        motors.lock().unwrap().drive(fwd, rev)?;
+                        set_angle(&mut servo.lock().unwrap(), angle);
+                        let mirrored = 180 - angle;
+                        set_angle(&mut servo2.lock().unwrap(), mirrored);
                     }
-                    other => { log::warn!("WS: unknown cmd '{}'", other); }
+                } else {
+                    log::warn!("WS: unknown cmd '{}'", cmd);
                 }
             }
             Ok((frame_type, _)) => { log::debug!("WS: unhandled frame {:?}", frame_type); }
