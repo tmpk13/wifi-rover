@@ -33,7 +33,7 @@ const HTML_SITE: &str = r#"
         #base {
             position: relative;
             width: 260px; height: 260px;
-            border-radius: 50%;
+            border-radius: 12px;
             background: #242424;
             border: 2px solid #383838;
             cursor: crosshair;
@@ -199,10 +199,8 @@ const HTML_SITE: &str = r#"
             const r  = base.getBoundingClientRect();
             const cx = r.left + r.width  / 2;
             const cy = r.top  + r.height / 2;
-            let dx = e.clientX - cx;
-            let dy = e.clientY - cy;
-            const dist = Math.sqrt(dx * dx + dy * dy);
-            if (dist > MAX_R) { dx *= MAX_R / dist; dy *= MAX_R / dist; }
+            let dx = Math.max(-MAX_R, Math.min(MAX_R, e.clientX - cx));
+            let dy = Math.max(-MAX_R, Math.min(MAX_R, e.clientY - cy));
             rawX =  dx / MAX_R;
             rawY = -dy / MAX_R;   // up = positive
             updateUI();
@@ -237,6 +235,7 @@ const HTML_SITE: &str = r#"
 pub fn register_handlers(
     server: &mut EspHttpServer<'static>,
     servo: Arc<Mutex<LedcDriver<'static>>>,
+    servo2: Arc<Mutex<LedcDriver<'static>>>,
     motors: Arc<Mutex<Motors<'static>>>,
 ) -> Result<()> {
     server.fn_handler("/", Method::Get, |request| -> Result<()> {
@@ -270,6 +269,8 @@ pub fn register_handlers(
                                 + steer * (SERVO_RIGHT as i32 - SERVO_LEFT as i32) / 200)
                                 .clamp(SERVO_LEFT as i32, SERVO_RIGHT as i32) as u32;
                             set_angle(&mut servo.lock().unwrap(), angle);
+                            let mirrored = (SERVO_LEFT + SERVO_RIGHT) as u32 - angle;
+                            set_angle(&mut servo2.lock().unwrap(), mirrored);
                         }
                     }
                     other => { log::warn!("WS: unknown cmd '{}'", other); }

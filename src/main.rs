@@ -23,15 +23,20 @@ fn main() -> Result<()> {
     let sys_loop = EspSystemEventLoop::take()?;
     let nvs = EspDefaultNvsPartition::take()?;
 
-    // Servo setup
-    let timer = LedcTimerDriver::new(
+    // Servo setup (two servos on same timer, mirrored)
+    let servo_timer = LedcTimerDriver::new(
         peripherals.ledc.timer0,
         &TimerConfig::default().frequency(Hertz(50)).resolution(Resolution::Bits14),
     )?;
-    let servo = Arc::new(Mutex::new(LedcDriver::new(
+    let servo1 = Arc::new(Mutex::new(LedcDriver::new(
         peripherals.ledc.channel0,
-        timer,
+        &servo_timer,
         peripherals.pins.gpio10,
+    )?));
+    let servo2 = Arc::new(Mutex::new(LedcDriver::new(
+        peripherals.ledc.channel3,
+        &servo_timer,
+        peripherals.pins.gpio3,
     )?));
 
     // Motor setup (GPIO4 = left PWM, GPIO5 = right PWM, GPIO6/7 = enable)
@@ -50,7 +55,7 @@ fn main() -> Result<()> {
 
     // HTTP server
     let mut server = EspHttpServer::new(&esp_idf_svc::http::server::Configuration::default())?;
-    http::register_handlers(&mut server, servo, motors)?;
+    http::register_handlers(&mut server, servo1, servo2, motors)?;
 
     loop {
         FreeRtos::delay_ms(1000);
