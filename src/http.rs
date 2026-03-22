@@ -4,12 +4,11 @@ use embedded_svc::{
     io::Write,
     ws::{FrameType, Receiver},
 };
-use esp_idf_hal::ledc::LedcDriver;
 use esp_idf_svc::http::server::{ws::EspHttpWsConnection, EspHttpServer};
 use std::sync::{Arc, Mutex};
 
 use crate::motor::Motors;
-use crate::servo::set_angle;
+use crate::stepper::Stepper;
 
 const HTML_SITE: &str = r#"
 <!DOCTYPE html>
@@ -39,18 +38,10 @@ const HTML_SITE: &str = r#"
             overflow: hidden;
             touch-action: none;
         }
-        #base::before, #base::after {
-            content: '';
-            position: absolute;
-            background: rgba(255,255,255,0.07);
-            pointer-events: none;
-        }
-        #base::before { width: 1px; height: 100%; left: 50%; transform: translateX(-50%); }
-        #base::after  { height: 1px; width: 100%; top: 50%;  transform: translateY(-50%); }
         #dz-x, #dz-y {
             position: absolute;
             background: rgba(255,255,255,0.045);
-            border: 1px solid rgba(255,255,255,0.07);
+            border: none;
             pointer-events: none;
         }
         #thumb {
@@ -250,8 +241,7 @@ const HTML_SITE: &str = r#"
 
 pub fn register_handlers(
     server: &mut EspHttpServer<'static>,
-    servo: Arc<Mutex<LedcDriver<'static>>>,
-    servo2: Arc<Mutex<LedcDriver<'static>>>,
+    stepper: Arc<Mutex<Stepper<'static>>>,
     motors: Arc<Mutex<Motors<'static>>>,
 ) -> Result<()> {
     // Serve the control page
@@ -282,9 +272,7 @@ pub fn register_handlers(
                         let rev = parts[1].parse::<u8>().unwrap_or(0).min(100);
                         let angle = parts[2].parse::<u32>().unwrap_or(90).clamp(0, 180);
                         motors.lock().unwrap().drive(fwd, rev)?;
-                        set_angle(&mut servo.lock().unwrap(), angle);
-                        let mirrored = 180 - angle;
-                        set_angle(&mut servo2.lock().unwrap(), mirrored);
+                        stepper.lock().unwrap().move_to_angle(angle);
                     }
                 } else {
                     log::warn!("WS: unknown cmd '{}'", cmd);
