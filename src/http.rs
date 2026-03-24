@@ -6,9 +6,12 @@ use embedded_svc::{
 };
 use esp_idf_svc::http::server::{ws::EspHttpWsConnection, EspHttpServer};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::motor::Motors;
-use crate::stepper::Stepper;
+
+pub const STEER_MIN: u32 = 0;
+pub const STEER_MAX: u32 = 1000;
 
 const HTML_SITE: &str = r#"
 <!DOCTYPE html>
@@ -108,13 +111,28 @@ const HTML_SITE: &str = r#"
             <input id="str" type="range" min="0" max="100" value="100">
             <span id="str-val">100%</span>
         </div>
+        <div class="scale-row">
+            <label>Min</label>
+            <input id="smin" type="range" min="0" max="180" value="45">
+            <span id="smin-val">45</span>
+        </div>
+        <div class="scale-row">
+            <label>Ctr</label>
+            <input id="sctr" type="range" min="0" max="180" value="90">
+            <span id="sctr-val">90</span>
+        </div>
+        <div class="scale-row">
+            <label>Max</label>
+            <input id="smax" type="range" min="0" max="180" value="135">
+            <span id="smax-val">135</span>
+        </div>
     </details>
     <p id="status">Connecting...</p>
     <script>
-        // Steering servo geometry (must match hardware config)
-        const SERVO_LEFT   = 45;
-        const SERVO_CENTER = 90;
-        const SERVO_RIGHT  = 135;
+        // Steering stepper geometry (configurable via settings)
+        let SERVO_LEFT   = 45;
+        let SERVO_CENTER = 90;
+        let SERVO_RIGHT  = 135;
 
         // Layout constants (must match CSS)
         const BASE_D  = 260;
@@ -139,11 +157,27 @@ const HTML_SITE: &str = r#"
         spdSlider.addEventListener('input', () => { spdVal.innerText = spdSlider.value + '%'; transmit(true); });
         strSlider.addEventListener('input', () => { strVal.innerText = strSlider.value + '%'; transmit(true); });
 
+        const sminSlider = document.getElementById('smin');
+        const sctrSlider = document.getElementById('sctr');
+        const smaxSlider = document.getElementById('smax');
+        function sendSteerSettings() {
+            SERVO_LEFT   = parseInt(sminSlider.value);
+            SERVO_CENTER = parseInt(sctrSlider.value);
+            SERVO_RIGHT  = parseInt(smaxSlider.value);
+            document.getElementById('smin-val').innerText = SERVO_LEFT;
+            document.getElementById('sctr-val').innerText = SERVO_CENTER;
+            document.getElementById('smax-val').innerText = SERVO_RIGHT;
+            wsSend('s:' + SERVO_LEFT + ',' + SERVO_CENTER + ',' + SERVO_RIGHT);
+        }
+        sminSlider.addEventListener('input', sendSteerSettings);
+        sctrSlider.addEventListener('input', sendSteerSettings);
+        smaxSlider.addEventListener('input', sendSteerSettings);
+
         // WebSocket
         let ws;
         function connect() {
             ws = new WebSocket('ws://' + location.host + '/ws');
-            ws.onopen  = () => { status.innerText = 'Ready'; };
+            ws.onopen  = () => { status.innerText = 'Ready'; sendSteerSettings(); };
             ws.onclose = () => {
                 status.innerText = 'Disconnected – reconnecting…';
                 setTimeout(connect, 1500);
@@ -226,7 +260,7 @@ const HTML_SITE: &str = r#"
             rawX = 0; rawY = 0;
             lastCmd = null;
             updateUI();
-            wsSend('c:0,0,90');
+            wsSend('c:0,0,' + SERVO_CENTER);
             status.innerText = 'Ready';
         }
 
@@ -241,7 +275,8 @@ const HTML_SITE: &str = r#"
 
 pub fn register_handlers(
     server: &mut EspHttpServer<'static>,
-    stepper: Arc<Mutex<Stepper<'static>>>,
+    steer_target: Arc<AtomicU32>,
+    steer_center: Arc<AtomicU32>,
     motors: Arc<Mutex<Motors<'static>>>,
 ) -> Result<()> {
     // Serve the control page
@@ -270,9 +305,16 @@ pub fn register_handlers(
                     if parts.len() == 3 {
                         let fwd = parts[0].parse::<u8>().unwrap_or(0).min(100);
                         let rev = parts[1].parse::<u8>().unwrap_or(0).min(100);
-                        let angle = parts[2].parse::<u32>().unwrap_or(90).clamp(0, 180);
+                        let angle = parts[2].parse::<u32>().unwrap_or(90).clamp(STEER_MIN, STEER_MAX);
                         motors.lock().unwrap().drive(fwd, rev)?;
-                        stepper.lock().unwrap().move_to_angle(angle);
+                        steer_target.store(angle, Ordering::Relaxed);
+                    }
+                } else if let Some(vals) = cmd.strip_prefix("s:") {
+                    let parts: Vec<&str> = vals.splitn(3, ',').collect();
+                    if parts.len() == 3 {
+                        let center = parts[1].parse::<u32>().unwrap_or(90);
+                        steer_center.store(center, Ordering::Relaxed);
+                        log::info!("Steer settings: min={} center={} max={}", parts[0], center, parts[2]);
                     }
                 } else {
                     log::warn!("WS: unknown cmd '{}'", cmd);

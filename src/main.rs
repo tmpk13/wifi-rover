@@ -6,7 +6,7 @@ mod wifi;
 
 use anyhow::Result;
 use esp_idf_hal::{
-    delay::FreeRtos,
+    delay::{Ets, FreeRtos},
     gpio::PinDriver,
     ledc::{config::TimerConfig, LedcDriver, LedcTimerDriver, Resolution},
     peripherals::Peripherals,
@@ -14,6 +14,7 @@ use esp_idf_hal::{
 };
 use esp_idf_svc::{eventloop::EspSystemEventLoop, http::server::EspHttpServer, nvs::EspDefaultNvsPartition};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 // Pin assignments:
 //
@@ -43,6 +44,25 @@ fn main() -> Result<()> {
     let in3 = PinDriver::output(peripherals.pins.gpio8)?;
     let in4 = PinDriver::output(peripherals.pins.gpio9)?;
     let stepper = Arc::new(Mutex::new(stepper::Stepper::new(in1, in2, in3, in4)));
+    let steer_target = Arc::new(AtomicU32::new(90));
+    let steer_center = Arc::new(AtomicU32::new(90));
+
+    // Dedicated stepper thread: reads target each iteration so commands are live.
+    {
+        let stepper = Arc::clone(&stepper);
+        let target = Arc::clone(&steer_target);
+        let center = Arc::clone(&steer_center);
+        std::thread::Builder::new().stack_size(4096).spawn(move || loop {
+            let angle = target.load(Ordering::Relaxed);
+            let ctr   = center.load(Ordering::Relaxed);
+            let moved = stepper.lock().unwrap().step_toward(angle, ctr);
+            if moved {
+                Ets::delay_us(stepper::STEP_DELAY_US);
+            } else {
+                FreeRtos::delay_ms(5);
+            }
+        }).unwrap();
+    }
 
     // Motor setup (GPIO4 = left PWM, GPIO5 = right PWM, GPIO6/7 = enable)
     let motor_timer = LedcTimerDriver::new(
@@ -60,7 +80,7 @@ fn main() -> Result<()> {
 
     // HTTP server
     let mut server = EspHttpServer::new(&esp_idf_svc::http::server::Configuration::default())?;
-    http::register_handlers(&mut server, stepper, motors)?;
+    http::register_handlers(&mut server, steer_target, steer_center, motors)?;
 
     loop {
         FreeRtos::delay_ms(1000);
