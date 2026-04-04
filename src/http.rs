@@ -6,12 +6,12 @@ use embedded_svc::{
 };
 use esp_idf_svc::http::server::{ws::EspHttpWsConnection, EspHttpServer};
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::motor::Motors;
+use crate::servo::Servo;
 
 pub const STEER_MIN: u32 = 0;
-pub const STEER_MAX: u32 = 1000;
+pub const STEER_MAX: u32 = 180;
 
 const HTML_SITE: &str = r#"
 <!DOCTYPE html>
@@ -275,8 +275,7 @@ const HTML_SITE: &str = r#"
 
 pub fn register_handlers(
     server: &mut EspHttpServer<'static>,
-    steer_target: Arc<AtomicU32>,
-    steer_center: Arc<AtomicU32>,
+    servo: Arc<Mutex<Servo<'static>>>,
     motors: Arc<Mutex<Motors<'static>>>,
 ) -> Result<()> {
     // Serve the control page
@@ -307,14 +306,12 @@ pub fn register_handlers(
                         let rev = parts[1].parse::<u8>().unwrap_or(0).min(100);
                         let angle = parts[2].parse::<u32>().unwrap_or(90).clamp(STEER_MIN, STEER_MAX);
                         motors.lock().unwrap().drive(fwd, rev)?;
-                        steer_target.store(angle, Ordering::Relaxed);
+                        servo.lock().unwrap().set_angle(angle)?;
                     }
                 } else if let Some(vals) = cmd.strip_prefix("s:") {
                     let parts: Vec<&str> = vals.splitn(3, ',').collect();
                     if parts.len() == 3 {
-                        let center = parts[1].parse::<u32>().unwrap_or(90);
-                        steer_center.store(center, Ordering::Relaxed);
-                        log::info!("Steer settings: min={} center={} max={}", parts[0], center, parts[2]);
+                        log::info!("Steer settings: min={} center={} max={}", parts[0], parts[1], parts[2]);
                     }
                 } else {
                     log::warn!("WS: unknown cmd '{}'", cmd);

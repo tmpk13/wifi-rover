@@ -1,28 +1,24 @@
 mod config;
 mod http;
 mod motor;
-mod stepper;
+mod servo;
 mod wifi;
 
 use anyhow::Result;
 use esp_idf_hal::{
-    delay::{Ets, FreeRtos},
-    gpio::PinDriver,
     ledc::{config::TimerConfig, LedcDriver, LedcTimerDriver, Resolution},
     peripherals::Peripherals,
     units::Hertz,
 };
+use esp_idf_hal::gpio::PinDriver;
 use esp_idf_svc::{eventloop::EspSystemEventLoop, http::server::EspHttpServer, nvs::EspDefaultNvsPartition};
+use esp_idf_hal::delay::FreeRtos;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicU32, Ordering};
 
 // Pin assignments:
 //
-// Stepper (ULN2003AN, full-step wave drive):
-//   GPIO10  — IN1
-//   GPIO3   — IN2
-//   GPIO8   — IN3
-//   GPIO9   — IN4
+// Servo (50 Hz PWM via LEDC timer1, 14-bit):
+//   GPIO10  — signal
 //
 // Motors (LEDC timer0, 1 kHz, 8-bit):
 //   GPIO4   — left motor PWM   (LEDC channel0)
@@ -38,31 +34,13 @@ fn main() -> Result<()> {
     let sys_loop = EspSystemEventLoop::take()?;
     let nvs = EspDefaultNvsPartition::take()?;
 
-    // Stepper setup (4 digital outputs to ULN2003AN IN1–IN4)
-    let in1 = PinDriver::output(peripherals.pins.gpio10)?;
-    let in2 = PinDriver::output(peripherals.pins.gpio3)?;
-    let in3 = PinDriver::output(peripherals.pins.gpio8)?;
-    let in4 = PinDriver::output(peripherals.pins.gpio9)?;
-    let stepper = Arc::new(Mutex::new(stepper::Stepper::new(in1, in2, in3, in4)));
-    let steer_target = Arc::new(AtomicU32::new(90));
-    let steer_center = Arc::new(AtomicU32::new(90));
-
-    // Dedicated stepper thread: reads target each iteration so commands are live.
-    {
-        let stepper = Arc::clone(&stepper);
-        let target = Arc::clone(&steer_target);
-        let center = Arc::clone(&steer_center);
-        std::thread::Builder::new().stack_size(4096).spawn(move || loop {
-            let angle = target.load(Ordering::Relaxed);
-            let ctr   = center.load(Ordering::Relaxed);
-            let moved = stepper.lock().unwrap().step_toward(angle, ctr);
-            if moved {
-                Ets::delay_us(stepper::STEP_DELAY_US);
-            } else {
-                FreeRtos::delay_ms(5);
-            }
-        }).unwrap();
-    }
+    // Servo setup (GPIO10, LEDC timer1 at 50 Hz, 14-bit, channel2)
+    let servo_timer = LedcTimerDriver::new(
+        peripherals.ledc.timer1,
+        &TimerConfig::default().frequency(Hertz(50)).resolution(Resolution::Bits14),
+    )?;
+    let servo_driver = LedcDriver::new(peripherals.ledc.channel2, &servo_timer, peripherals.pins.gpio10)?;
+    let servo = Arc::new(Mutex::new(servo::Servo::new(servo_driver)));
 
     // Motor setup (GPIO4 = left PWM, GPIO5 = right PWM, GPIO6/7 = enable)
     let motor_timer = LedcTimerDriver::new(
@@ -80,7 +58,7 @@ fn main() -> Result<()> {
 
     // HTTP server
     let mut server = EspHttpServer::new(&esp_idf_svc::http::server::Configuration::default())?;
-    http::register_handlers(&mut server, steer_target, steer_center, motors)?;
+    http::register_handlers(&mut server, servo, motors)?;
 
     loop {
         FreeRtos::delay_ms(1000);
